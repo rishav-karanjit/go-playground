@@ -1,6 +1,9 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"reflect"
+)
 
 type MyUnion interface {
 	isMyUnion()
@@ -25,10 +28,18 @@ func main() {
 	union = &MyUnionMemberIntegerValue{
 		Value: 123,
 	}
-	fmt.Println("Union holds an integer %v", union)
 
-	union = &MyUnionMemberStringValue{
-		Value: "Hello",
+	switch v := union.(type) {
+
+	case *MyUnionMemberStringValue:
+		fmt.Println("Union holds a string", v.Value)
+	default:
+		panic(fmt.Sprintf("Union holds an unknown type %T ", v))
 	}
-	fmt.Println("Union holds a string %v", union)
+	// fmt.Println("Union holds an integer %v", union)
+	fmt.Println(reflect.TypeOf(union))
+	// union = &MyUnionMemberStringValue{
+	// 	Value: "Hello",
+	// }
+	// fmt.Println("Union holds a string %v", union)
 }
