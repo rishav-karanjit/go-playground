@@ -11,59 +11,60 @@ import (
 	"github.com/aws/smithy-go/middleware"
 )
 
+type DbEsdkMiddleware struct {
+	originalRequests map[string]interface{}
+}
+
+func NewDbEsdkMiddleware() *DbEsdkMiddleware {
+	return &DbEsdkMiddleware{
+		originalRequests: make(map[string]interface{}),
+	}
+}
+
+func (m *DbEsdkMiddleware) CreateMiddleware() func(options *dynamodb.Options) {
+	return func(options *dynamodb.Options) {
+		options.APIOptions = append(options.APIOptions, func(stack *middleware.Stack) error {
+			// Add request interceptor at the beginning of Initialize step
+			requestIntercetor := m.createRequestInterceptor()
+			if err := stack.Initialize.Add(requestIntercetor, middleware.Before); err != nil {
+				return err
+			}
+			// Add response interceptor at the end of Finalize step
+			return stack.Finalize.Add(m.createResponseInterceptor(), middleware.After)
+		})
+	}
+}
+
+func (m *DbEsdkMiddleware) createRequestInterceptor() middleware.InitializeMiddleware {
+	return middleware.InitializeMiddlewareFunc("RequestInterceptor", func(
+		ctx context.Context, in middleware.InitializeInput, next middleware.InitializeHandler,
+	) (
+		out middleware.InitializeOutput, metadata middleware.Metadata, err error,
+	) {
+		m.handleRequestInterception(in.Parameters)
+		return next.HandleInitialize(ctx, in)
+	})
+}
+
 // handleRequestInterception handles the interception logic before the DynamoDB operation
-func handleRequestInterception(params interface{}) {
+func (m *DbEsdkMiddleware) handleRequestInterception(params interface{}) {
 	if v, ok := params.(*dynamodb.PutItemInput); ok {
+		m.originalRequests["PutItemInput"] = *v
+		fmt.Println("Original PutItemInput:")
+		fmt.Println(m.originalRequests["PutItemInput"].(dynamodb.PutItemInput).Item["intercepted attribute"].(*types.AttributeValueMemberS))
+
 		if idAttr, ok := v.Item["ID"]; ok {
 			if idNum, ok := idAttr.(*types.AttributeValueMemberN); ok {
 				if idNum.Value == "1" {
 					v.Item["intercepted attribute"] = &types.AttributeValueMemberS{Value: "Intercepted by me"}
-					fmt.Println("Request intercepted")
 				}
 			}
 		}
 	}
 }
 
-// handleResponseInterception handles the interception logic after the DynamoDB operation
-func handleResponseInterception(response interface{}) {
-	if _, ok := response.(*dynamodb.PutItemOutput); ok {
-		fmt.Println("PutItemOutput Response intercepted:")
-		// You can modify the response here if needed
-	}
-	if getItemOutput, ok := response.(*dynamodb.GetItemOutput); ok {
-		fmt.Println("GetItemOutput Response intercepted:")
-		if age, ok := getItemOutput.Item["Age"].(*types.AttributeValueMemberN); ok {
-			fmt.Println("Age:", age.Value)
-		}
-		if id, ok := getItemOutput.Item["ID"].(*types.AttributeValueMemberN); ok {
-			fmt.Println("ID:", id.Value)
-		}
-		if name, ok := getItemOutput.Item["Name"].(*types.AttributeValueMemberS); ok {
-			fmt.Println("Name:", name.Value)
-		}
-		if intercepted, ok := getItemOutput.Item["intercepted attribute"].(*types.AttributeValueMemberS); ok {
-			fmt.Println("intercepted attribute:", intercepted.Value)
-		}
-		getItemOutput.Item["intercepted attribute"] = &types.AttributeValueMemberS{Value: "I read your data "}
-		// You can modify the response here if needed
-	}
-}
-
-// createRequestInterceptor creates and returns the middleware interceptor for requests
-func createRequestInterceptor() middleware.InitializeMiddleware {
-	return middleware.InitializeMiddlewareFunc("RequestInterceptor", func(
-		ctx context.Context, in middleware.InitializeInput, next middleware.InitializeHandler,
-	) (
-		out middleware.InitializeOutput, metadata middleware.Metadata, err error,
-	) {
-		handleRequestInterception(in.Parameters)
-		return next.HandleInitialize(ctx, in)
-	})
-}
-
 // createResponseInterceptor creates and returns the middleware interceptor for responses
-func createResponseInterceptor() middleware.FinalizeMiddleware {
+func (m *DbEsdkMiddleware) createResponseInterceptor() middleware.FinalizeMiddleware {
 	return middleware.FinalizeMiddlewareFunc("ResponseInterceptor", func(
 		ctx context.Context, in middleware.FinalizeInput, next middleware.FinalizeHandler,
 	) (
@@ -74,23 +75,21 @@ func createResponseInterceptor() middleware.FinalizeMiddleware {
 		if err != nil {
 			return result, metadata, err
 		}
-
 		// Then intercept the response
-		handleResponseInterception(result.Result)
+		m.handleResponseInterception(result.Result)
 		return result, metadata, err
 	})
 }
 
-// configureInterceptors adds both request and response interceptors to the AWS configuration
-func configureInterceptors(cfg *aws.Config) {
-	cfg.APIOptions = append(cfg.APIOptions, func(stack *middleware.Stack) error {
-		// Add request interceptor at the beginning of Initialize step
-		if err := stack.Initialize.Add(createRequestInterceptor(), middleware.Before); err != nil {
-			return err
+// handleResponseInterception handles the interception logic after the DynamoDB operation
+func (m *DbEsdkMiddleware) handleResponseInterception(response interface{}) {
+	if _, ok := response.(*dynamodb.PutItemOutput); ok {
+		fmt.Println("PutItemOutput Response intercepted:")
+		if att, ok := m.originalRequests["PutItemInput"].(dynamodb.PutItemInput).Item["intercepted attribute"].(*types.AttributeValueMemberS); ok {
+			fmt.Println("intercepted attribute:", att.Value)
 		}
-		// Add response interceptor at the end of Finalize step
-		return stack.Finalize.Add(createResponseInterceptor(), middleware.After)
-	})
+		// You can modify the response here if needed
+	}
 }
 
 func main() {
@@ -104,18 +103,20 @@ func main() {
 	}
 
 	// Configure both interceptors
-	configureInterceptors(&cfg)
+	// configureInterceptors(&cfg)
 
 	// Create DynamoDB client
-	client := dynamodb.NewFromConfig(cfg)
+	ddbMiddleware := NewDbEsdkMiddleware().CreateMiddleware()
+	client := dynamodb.NewFromConfig(cfg, ddbMiddleware)
 
 	// Create the input for PutItem
 	putItemInput := &dynamodb.PutItemInput{
 		TableName: aws.String("TestEverythingHere"),
 		Item: map[string]types.AttributeValue{
-			"ID":   &types.AttributeValueMemberN{Value: "1"},
-			"Name": &types.AttributeValueMemberS{Value: "John Doe"},
-			"Age":  &types.AttributeValueMemberN{Value: "30"},
+			"ID":                    &types.AttributeValueMemberN{Value: "1"},
+			"Name":                  &types.AttributeValueMemberS{Value: "John Doe"},
+			"Age":                   &types.AttributeValueMemberN{Value: "30"},
+			"intercepted attribute": &types.AttributeValueMemberS{Value: "Yo"},
 		},
 	}
 
